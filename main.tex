@@ -1,0 +1,119 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{cite}
+\geometry{margin=1in}
+
+\title{Improving Model Inversion Attacks Using Additional Backbones}
+\author{Christopher Roßbach \\ FAU-Erlangen-Nürnberg}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\begin{abstract}
+    Model inversion attacks aim to infer sensitive information about input or training data from the outputs or representations of machine learning models.
+    In this work we explore model inversion in the form of reconstructing images from their feature embeddings in a known latent space.
+    We explore the effectiveness of optimization based methods in different latent spaces.
+    Using the discovered findings, we propose a method that leverages the embeddings of multiple reconstruction candidates in foreign latent spaces to improve reconstruction quality.
+\end{abstract}
+
+\section{Introduction}
+Model inversion attacks pose significant risks by reconstructing private information about either training data or model inputs.
+This report investigates techniques that try to reconstruct the full model input from a latent representation.
+We limit ourselves to the task of image reconstruction from feature embeddings given by a pretrained vision backbone.
+We assume a white-box setting where the attacker has access to the model architecture and parameters as well as the feature embedding of the target image.
+
+We aim to approximate the private image $x^*$ owned by the victim from its embedding $y^* = f(x^*)$ where $f$ is a pretrained known backbone network and $y^*$ is the embedding known to the attacker (either leaked or purposely shared).
+
+\section{Related Work}
+Brief overview of previous research on model inversion attacks and defense mechanisms.
+
+
+\section{Methodology}
+We try to reconstruct the private image from its embedding through an optimization process.
+The problem of reconstructing the private image from its embedding is a strongly ill posed which forces us to incorporate additional constraints and priors to the optimization process.
+The optimization problem can be formulated as
+$$
+\min_{\hat{x}} d(f(\hat{x}), y^*) + \mathcal{R}(\hat{x}),
+$$
+where $\mathcal{R}$ is a regularization term that encourages the reconstruction to be smooth and natural and is further described in Section~\ref{reg}.
+$d$ is a distance function that is dependent on the used backbone $f$.
+For a ResNet backbone we use the mean squared error (MSE) as the distance function while using a cosine based distance for a clip encoder.
+\subsection{The Iterative Base Method}\label{base_method}
+We employ an iterative optimization method to progressively refine the reconstruction.
+We generally optimize in the image space while resorting to a lower dimensional image space at the beginning of the reconstruction.
+Successive upscaling encourages the reconstruction of coarse structures before refining details.
+We take the resolution steps used in~\cite{kazemi_what_2024} and find adding another low resolution step of 32 to be beneficial, resulting in a scale sequence of $n\in\{32, 64, 128, 224\}$ where upscaling is performed at steps 400, 900 and 1800.
+
+At each iteration, we update the reconstruction $x$ in the possibly smaller space $\mathbb{R}^{3\times n \times n}$ from which we retrieve the full size reconstruction proposal $\mathbb{R}^{3\times N \times N}\ni\hat{x} = S_N(x)$ by using a differentiable scaling function $S_k:\mathbb{R}^{3\times n \times n}\rightarrow\mathbb{R}^{3\times k \times k}$.
+The next reconstruction $x$ is determined by
+$$
+x^{(t)} = S_{n_t}\left(x^{(t-1)} - \eta \dfrac{\nabla \mathcal{L}(x^{(t-1)}, y^*)}{\|\nabla \mathcal{L}(x^{(t-1)}, y^*)\|_2}\right),
+$$
+where $t$ denotes the iteration step, $n_t$ the resolution at step $t$, $\eta$ is the learning rate, and $\mathcal{L}$ the loss function.
+This process is repeated for 3000 iterations after which no notable improvement was noticed in practice.
+
+For now, the loss function $\mathcal{L}$ is defined as
+$$
+\mathcal{L}(x, y^*) = d(f(A(S_N(x))), y^*) + \mathcal{R}(S_N(x)),
+$$
+where $A$ is a randomized augmentation function as described in Section~\ref{augs}, and $d$ is a distance function that is dependent on the used backbone $f$ and $\mathcal{R}$ is a regularization term as described in Section~\ref{reg}.
+
+\subsection{Augmentations}\label{augs}
+As proposed in~\cite{ghiasi_plug-inversion_2021} we employ a set of differentiable augmentations to improve the robustness of the reconstruction.
+We expect the embedding to be stable under (slight) scaling, rotation and translation.
+We incorporate these augmentations into the optimization process as a prior by applying a (different) set of augmentations at each step of the optimization.
+The transformation is thereby chosen randomly from $(\text{scale}, \text{rotate}, \text{translate}_h, \text{translate}_v) \in \lbrack 0.7, 1.5\rbrack\times \lbrack -30, 30\rbrack \times \lbrack -0.1, 0.1\rbrack \times \lbrack -0.1, 0.1\rbrack$.
+
+\subsection{Regularization}\label{reg}
+For regularization we use a term based on total variation as proposed in~\cite{mahendran_understanding_2015} with the adjustment of using a $L_1$ distance:
+$$
+\mathcal{R}(x) = g_{\alpha,\beta}\left(\dfrac{\mathcal{R}_{TV}(x)}{(n-1)^2}\right)
+$$
+with
+$$
+\mathcal{R}_{TV}(x) = \sum_{i,j} \left| x_{i,j} - x_{i + 1,j} \right| + \left| x_{i,j} - x_{i,j + 1} \right|.
+$$
+This term is used to penalize sharp edges in the reconstructed images.
+Here $n$ refers to the width of the square image and $g_{\alpha,\beta}$ is a penalty function that balances the contribution of the total variation term and is defined as:
+$$
+g_{\alpha,\beta}(x) = \text{relu}(x - \alpha) + \beta\cdot\text{relu}(x - \alpha) ^ 2.
+$$
+This quadratic dead zone penalty function allows for punishment-free variation in the interval $\lbrack-\alpha,\alpha\rbrack$ and (for big enough $\beta$) limits the total variation to be close to $\alpha$.
+The use of this penalty function makes sure, that the this regularization term does not loose importance when adding additional terms to the objective function of the optimization.
+A parameter selection of $\alpha = 0.3$ and $\beta = 10$ was found to yield good results in practice.\footnote{We could pin this to the avg value of e.g. Imagenet Data.}
+
+\section{Experiments}
+\subsection{Impact of Inverted Model}
+The reconstruction method described in Section~\ref{base_method} yields visibly different results when using different backbones $f$.
+It is to note, that the reconstruction for different backbones does not strictly yield better or worse reconstructions, but rather reconstruction with qualitatively different details.
+
+For the picture of the safe, we note that the reconstruction on a ResNet backbone gives a picture containg structural properties of a safe, while the reconstruction on the clip embedding seems to reproduce the text contained in the original picture.
+For the dog picture, the reconstruction based on the clip embedding yields a better representation of the dog's features compared to the ResNet based reconstruction, while the ResNet reconstruction contains patterns of the background.
+In the reconstruction of the fish picture the ResNet based reconstruction focuses on the fish's shape and the hands while the clip based reconstruction reconstructs the face of the person holding the fish.
+
+From this observation we conclude, that a improvement in reconstruction quality can be achieved by combining different backbones in the reconstruction process while maintaining the assumption to have access to a single embedding.
+
+
+\section{Results}
+Presentation and analysis of experimental results. Include tables and figures as needed.
+
+\section{Discussion}
+Interpretation of results, limitations, and potential improvements.
+\begin{itemize}
+    \item only approximate components with high agreement in foreign space
+    \item difference between in and ood data
+\end{itemize}
+
+\section{Conclusion}
+Summary of findings and suggestions for future work.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
