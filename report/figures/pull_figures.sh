@@ -1,0 +1,1 @@
+scp tinyx:/home/woody/iwi1/iwi1106h/Projects/BUBE/out/figures/\* .
